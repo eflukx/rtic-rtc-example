@@ -1,11 +1,11 @@
 #![no_main]
 #![no_std]
 
+pub mod monotonic_nrf52_rtc;
+
 use defmt_rtt as _; // global logger
-
-use nrf52833_hal as _; // memory layout
-
-use panic_probe as _;
+pub use nrf52833_hal as hal;
+use panic_probe as _; // memory layout
 
 // same panicking *behavior* as `panic-probe` but doesn't print a panic message
 // this prevents the panic message being printed *twice* when `defmt::panic` is invoked
