@@ -1,12 +1,11 @@
 // RTIC Monotonic impl for the RTCs
 // for reference, see: https://gist.github.com/korken89/fe94a475726414dd1bce031c76adc3dd
 
-use nrf52833_hal::pac::{rtc0, RTC0, RTC1, RTC2};
-
-pub use fugit::{self, ExtU32};
+use crate::hal::pac::{rtc0, RTC0, RTC1, RTC2};
+pub use fugit::{self, ExtU64};
 use rtic_monotonic::Monotonic;
 
-pub struct  MonoRtc<T: InstanceRtc> {
+pub struct MonoRtc<T: InstanceRtc> {
     overflow: u64,
     rtc: T,
 }
@@ -14,7 +13,6 @@ pub struct  MonoRtc<T: InstanceRtc> {
 impl<T: InstanceRtc> MonoRtc<T> {
     pub fn new(rtc: T) -> Self {
         unsafe { rtc.prescaler.write(|w| w.bits(0)) };
-
         MonoRtc { overflow: 0, rtc }
     }
 
@@ -26,6 +24,8 @@ impl<T: InstanceRtc> MonoRtc<T> {
 impl<T: InstanceRtc> Monotonic for MonoRtc<T> {
     type Instant = fugit::TimerInstantU64<32_768>;
     type Duration = fugit::TimerDurationU64<32_768>;
+
+    const DISABLE_INTERRUPT_ON_EMPTY_QUEUE: bool = false;
 
     unsafe fn reset(&mut self) {
         self.rtc.intenset.write(|w| w.compare0().set().ovrflw().set());
@@ -46,14 +46,23 @@ impl<T: InstanceRtc> Monotonic for MonoRtc<T> {
     fn set_compare(&mut self, instant: Self::Instant) {
         let now = self.now();
 
+        // A minimum amount of ticks left is needed (empirically found this to be 3)
+        // if ticks left is lower than this bound, the interrupt may not fire (and hang the app).
+        const MIN_TICKS_FOR_COMPARE: u64 = 3;
+
         // Since the timer may or may not overflow based on the requested compare val, we check
         // how many ticks are left.
         let val = match instant.checked_duration_since(now) {
-            Some(x) if x.ticks() <= 0xffffff => instant.duration_since_epoch().ticks() & 0xffffff, // Will not overflow
-            _ => 0, // Will overflow or in the past, set the same value as after overflow to not get extra interrupts
-        };
+            Some(x) if (x.ticks() <= 0x00ff_ffff && x.ticks() > MIN_TICKS_FOR_COMPARE) => {
+                instant.duration_since_epoch().ticks() & 0x00ff_ffff
+            }
 
-        unsafe { self.rtc.cc[0].write(|w| w.bits(val as u32)) };
+            Some(x) => (instant.duration_since_epoch().ticks() + (MIN_TICKS_FOR_COMPARE - x.ticks())) & 0x00ff_ffff,
+
+            _ => 0, // Will overflow or in the past, set the same value as after overflow to not get extra interrupts
+        } as u32;
+
+        unsafe { self.rtc.cc[0].write(|w| w.bits(val)) };
     }
 
     fn clear_compare_flag(&mut self) {
